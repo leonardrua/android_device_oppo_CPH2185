@@ -2525,7 +2525,6 @@ vendor/lib/hw/local_time.default.so
 vendor/lib64/hw/local_time.default.so
 
 # Media
-etc/seccomp_policy/mediacodec.policy
 lib/libstagefright_codecbase.so
 lib/libstagefright_wfd_mtk.so
 lib/vendor.mediatek.hardware.gpu@1.0.so

@@ -59,9 +59,7 @@ PRODUCT_PACKAGES += \
     meta_init.rc \
     multi_init.rc \
     init.aging.rc \
-    init.rc \
     init.recovery.mt6765.rc \
-    ueventd.rc \
     ueventd.reserve.rc \
 
 PRODUCT_COPY_FILES += \

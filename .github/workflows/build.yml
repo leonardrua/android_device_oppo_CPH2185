@@ -1,4 +1,4 @@
-name: Build LineageOS 17.1 (Oppo A15 CPH2185) - Namespace
+name: Build LineageOS 23.2 (Oppo A15 CPH2185) - Namespace
 
 on:
   workflow_dispatch:
@@ -9,14 +9,14 @@ on:
       device_branch:
         description: 'Device tree branch'
         required: true
-        default: 'lineage-17.1'
+        default: 'lineage-23.2'
       vendor_repo:
         description: 'Vendor repo (same repo if both live together)'
         required: true
       vendor_branch:
         description: 'Vendor branch'
         required: true
-        default: 'vendor-lineage-17.1'
+        default: 'vendor-lineage-23.2'
       device_name:
         description: 'Device codename'
         required: true
@@ -55,30 +55,11 @@ on:
         required: true
         type: boolean
         default: false
-      fix_init_rc:
-        description: 'Remove the conflicting init.rc module from the device tree'
-        required: true
-        type: boolean
-        default: true
-      fix_root_copy:
-        description: 'Fix ueventd.rc / init.rc copy conflicts into root (ueventd.rc is moved to vendor)'
-        required: true
-        type: boolean
-        default: true
       preflight:
-        description: 'Check the makefile stage and auto-fix known errors before building (no re-sync)'
+        description: 'Check the makefile stage before building (no re-sync)'
         required: true
         type: boolean
         default: true
-      apk_mode:
-        description: 'APKs in PRODUCT_COPY_FILES: strip = delete them (quick test) / prebuilt = convert to BUILD_PREBUILT modules / none = leave untouched'
-        required: true
-        default: 'strip'
-        type: choice
-        options:
-          - strip
-          - prebuilt
-          - none
 
 permissions:
   contents: read
@@ -99,11 +80,7 @@ jobs:
       BUILD_TIMEOUT_MIN: ${{ inputs.build_timeout_min }}
       OUT_ON_CACHE: ${{ inputs.out_on_cache }}
       CLEAN_OUT: ${{ inputs.clean_out }}
-      FIX_INIT_RC: ${{ inputs.fix_init_rc }}
-      FIX_ROOT_COPY: ${{ inputs.fix_root_copy }}
-      APK_MODE: ${{ inputs.apk_mode }}
       CCACHE_SIZE: 10G
-      FIXES: ${{ github.workspace }}/tree_fixes.py
 
     steps:
       # ------------------------------------------------------------ setup --
@@ -192,10 +169,10 @@ jobs:
           echo "Inputs look good"
 
       # ----------------------------------------------------------- sources --
-      - name: Sync LineageOS 17.1 source
+      - name: Sync LineageOS 23.2 source
         run: |
           mkdir -p lineage && cd lineage
-          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-17.1 \
+          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 \
             -g default,-darwin --depth=1 --no-clone-bundle
 
           ( while true; do
@@ -233,484 +210,6 @@ jobs:
           fi
 
       # ----------------------------------------------------------- patches --
-      - name: Write makefile fix helper
-        run: |
-          cat > "$FIXES" <<'PYEOF'
-          #!/usr/bin/env python3
-          """Makefile fixers for the LineageOS 17.1 CI build.
-
-          Run from the source-tree root:
-              tree_fixes.py {init-rc|root-copy|apk|preflight}
-
-            init-rc    remove conflicting init.rc module definitions from the device tree
-            root-copy  fix PRODUCT_COPY_FILES conflicts for ueventd.rc / init.rc
-            apk        strip prebuilt .apk entries from PRODUCT_COPY_FILES, or turn them
-                       into BUILD_PREBUILT modules (APK_MODE=prebuilt)
-            preflight  run `m nothing` repeatedly and auto-fix the known errors
-          """
-          import os
-          import pathlib
-          import re
-          import subprocess
-          import sys
-
-          DEV = os.environ["DEVICE"]
-          BTYPE = os.environ.get("BTYPE", "userdebug")
-          APK_MODE = os.environ.get("APK_MODE", "strip")
-          WS = pathlib.Path(os.environ.get("GITHUB_WORKSPACE", "."))
-
-          DEVICE_DIR = pathlib.Path("device/oppo") / DEV
-          VENDOR_DIR = pathlib.Path("vendor/oppo") / DEV
-
-          _log_file = None
-
-
-          # ---------------------------------------------------------------- helpers --
-
-          def log(*args):
-              msg = " ".join(str(a) for a in args)
-              print(msg, flush=True)
-              if _log_file:
-                  with open(_log_file, "a", encoding="utf-8") as fh:
-                      fh.write(msg + "\n")
-
-
-          def read(path):
-              return path.read_text(encoding="utf-8", errors="surrogateescape")
-
-
-          def write(path, text):
-              path.write_text(text, encoding="utf-8", errors="surrogateescape")
-
-
-          def sh(cmd, timeout=3000):
-              p = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
-                                 errors="replace", timeout=timeout)
-              return p.returncode, (p.stdout or "") + (p.stderr or "")
-
-
-          def mk_files(*roots):
-              files = []
-              for root in roots:
-                  if root.exists():
-                      files += sorted(root.rglob("*.mk"))
-              return files
-
-
-          def is_comment(line):
-              return line.lstrip().startswith("#")
-
-
-          def clean_line(old, new):
-              """Tidy a line after tokens were removed, keeping any line continuation."""
-              if new.strip() in ("", "\\"):
-                  return "\\" if old.rstrip().endswith("\\") else ""
-              return new
-
-
-          # ---------------------------------------------------------------- init.rc --
-
-          INIT_RC_BLOCK = re.compile(
-              r"include \$\(CLEAR_VARS\)(?:(?!include \$\(CLEAR_VARS\)).)*?"
-              r"LOCAL_MODULE\s*:?=\s*init\.rc[ \t]*\n"
-              r"(?:(?!include \$\(CLEAR_VARS\)).)*?"
-              r"include \$\(BUILD_[A-Z_]+\)[ \t]*\n?",
-              re.S,
-          )
-          INIT_RC_PACKAGE_LINE = re.compile(r"^\s*init\.rc\s*\\?\s*$")
-
-
-          def cmd_init_rc():
-              # 1) drop Android.mk blocks that define LOCAL_MODULE := init.rc
-              for f in DEVICE_DIR.rglob("Android.mk"):
-                  new, n = INIT_RC_BLOCK.subn("", read(f))
-                  if n:
-                      write(f, new)
-                      log(f"Removed {n} init.rc module block(s) from {f}")
-
-              # 2) drop init.rc from PRODUCT_PACKAGES lists
-              for f in DEVICE_DIR.rglob("*.mk"):
-                  out, changed = [], False
-                  for ln in read(f).split("\n"):
-                      if INIT_RC_PACKAGE_LINE.match(ln):
-                          out.append("\\" if ln.rstrip().endswith("\\") else "")
-                          changed = True
-                      else:
-                          out.append(ln)
-                  if changed:
-                      write(f, "\n".join(out))
-                      log(f"Removed init.rc from {f}")
-
-              # 3) Android.bp definitions cannot be patched safely, so just warn
-              for f in DEVICE_DIR.rglob("Android.bp"):
-                  if re.search(r'name:\s*"init\.rc"', read(f)):
-                      log(f'::warning::Module "init.rc" is defined in {f} (Android.bp); '
-                          "remove it from the repository by hand")
-
-
-          # -------------------------------------------------- ueventd.rc / init.rc ----
-
-          ROOT_RC = re.compile(r"(\S+?):((?:\S*/)?(?:ueventd|init)\.rc)(?::[\w.-]+)?(?=[\s\\]|$)")
-
-
-          def is_root_dst(dst):
-              return (dst.startswith("root/") or "TARGET_ROOT_OUT" in dst
-                      or "TARGET_COPY_OUT_ROOT" in dst)
-
-
-          def is_vendor_dst(dst):
-              return ("TARGET_COPY_OUT_VENDOR" in dst or dst.startswith("vendor/")
-                      or "TARGET_COPY_OUT_ODM" in dst or dst.startswith("odm/"))
-
-
-          def is_foreign_dst(dst):
-              return bool(re.search(
-                  r"VENDOR|ODM|^vendor/|^odm/|^system/|TARGET_COPY_OUT_SYSTEM", dst))
-
-
-          def rewrite_root_copy(files, is_target, vendor_used):
-              """Rewrite copy pairs for which is_target(src, dst, file) is true.
-
-              init.rc copies are dropped. The first ueventd.rc copy is moved to the
-              vendor partition (unless one already exists there); later ones are dropped.
-              Returns the number of files modified.
-              """
-              state = {"vendor_used": vendor_used, "files": 0}
-
-              for f in files:
-                  text = read(f)
-                  if "ueventd.rc" not in text and "init.rc" not in text:
-                      continue
-
-                  def repl(m, f=f):
-                      src, dst = m.group(1), m.group(2)
-                      if not is_target(src, dst, f):
-                          return m.group(0)
-                      if dst.endswith("init.rc"):
-                          log(f"  drop {src}:{dst}   ({f})")
-                          return ""
-                      if state["vendor_used"]:
-                          log(f"  drop {src}:{dst}   ({f})")
-                          return ""
-                      state["vendor_used"] = True
-                      log(f"  move to vendor: {src}:{dst}   ({f})")
-                      return f"{src}:$(TARGET_COPY_OUT_VENDOR)/ueventd.rc"
-
-                  out, changed = [], False
-                  for ln in text.split("\n"):
-                      if is_comment(ln) or not ROOT_RC.search(ln):
-                          out.append(ln)
-                          continue
-                      new = ROOT_RC.sub(repl, ln)
-                      if new != ln:
-                          changed = True
-                          new = clean_line(ln, new)
-                      out.append(new)
-                  if changed:
-                      write(f, "\n".join(out))
-                      state["files"] += 1
-                      log(f"Modified: {f}")
-              return state["files"]
-
-
-          # Fallback that does not depend on finding the offending line in any .mk file
-          # (pairs built with $(foreach)/$(wildcard)/find-copy-subdir-files, three-part
-          # src:dst:owner entries, product makefiles outside device/vendor/hardware...).
-          #
-          # PRODUCT_COPY_FILES is read-only (kati) by the time the core Makefile runs, so
-          # it cannot be reassigned. Instead the patch computes a filtered copy of the
-          # list in a private variable and points the core copy loop at it:
-          #   - root/init.rc copies are dropped
-          #   - root/ueventd.rc is moved to vendor/ueventd.rc (or dropped if a vendor
-          #     copy already exists)
-          CORE_MAKEFILE = pathlib.Path("build/make/core/Makefile")
-          CORE_ANCHOR = "# filter out the duplicate <source file>:<dest file> pairs.\n"
-          CORE_LOOP_OLD = "$(foreach cf,$(PRODUCT_COPY_FILES), \\\n"
-          CORE_LOOP_NEW = "$(foreach cf,$(_ci_pcf_final), \\\n"
-          CORE_MARKER = "# --- CI fix v2 (auto-generated): root copy conflicts ---"
-          CORE_END = "# --- end CI fix ---\n"
-          # First-generation patch assigned to PRODUCT_COPY_FILES and breaks kati; strip it if found.
-          LEGACY_MARKER = "# --- CI fix (auto-generated): root copy conflicts ---"
-          CORE_SNIPPET = """\
-          # --- CI fix v2 (auto-generated): root copy conflicts ---
-          _ci_pcf_dest = $(word 2,$(subst :, ,$(1)))
-          _ci_pcf_src = $(word 1,$(subst :, ,$(1)))
-          _ci_vendor_ue := $(filter vendor/ueventd.rc odm/ueventd.rc,$(foreach p,$(PRODUCT_COPY_FILES),$(call _ci_pcf_dest,$(p))))
-          _ci_root_ue := $(strip $(foreach p,$(PRODUCT_COPY_FILES),$(if $(filter root/ueventd.rc,$(call _ci_pcf_dest,$(p))),$(p))))
-          _ci_pcf_final := $(foreach p,$(PRODUCT_COPY_FILES),$(if $(filter root/ueventd.rc root/init.rc,$(call _ci_pcf_dest,$(p))),,$(p)))
-          ifeq ($(strip $(_ci_vendor_ue)),)
-          ifneq ($(_ci_root_ue),)
-          _ci_pcf_final += $(call _ci_pcf_src,$(firstword $(_ci_root_ue))):vendor/ueventd.rc
-          endif
-          endif
-          # --- end CI fix ---
-
-          """
-
-
-          def patch_core_copy_files():
-              """Install the PRODUCT_COPY_FILES filter. Returns True if newly applied."""
-              if not CORE_MAKEFILE.exists():
-                  log(f"::warning::{CORE_MAKEFILE} not found; cannot apply the build-system override")
-                  return False
-              text = read(CORE_MAKEFILE)
-              if CORE_MARKER in text:
-                  log("Build-system override is already in place")
-                  return False
-
-              if LEGACY_MARKER in text:
-                  a = text.index(LEGACY_MARKER)
-                  b = text.index(CORE_END, a) + len(CORE_END)
-                  text = text[:a] + text[b:].lstrip("\n")
-                  log("Removed an earlier, incompatible override from the core Makefile")
-
-              if CORE_ANCHOR not in text:
-                  log(f"::warning::Anchor line not found in {CORE_MAKEFILE}; cannot apply the override")
-                  return False
-              head, tail = text.split(CORE_ANCHOR, 1)
-              if CORE_LOOP_OLD not in tail:
-                  log(f"::warning::Copy loop not found in {CORE_MAKEFILE}; cannot apply the override")
-                  return False
-              tail = tail.replace(CORE_LOOP_OLD, CORE_LOOP_NEW, 1)
-              write(CORE_MAKEFILE, head + CORE_SNIPPET + CORE_ANCHOR + tail)
-              log(f"Applied the PRODUCT_COPY_FILES filter to {CORE_MAKEFILE}")
-              return True
-
-
-          def cmd_root_copy():
-              files = mk_files(VENDOR_DIR, DEVICE_DIR)
-              vendor_used = any(
-                  m.group(2).endswith("ueventd.rc") and is_vendor_dst(m.group(2))
-                  for f in files
-                  for m in ROOT_RC.finditer(read(f))
-              )
-              log("ueventd.rc already installed to vendor:", vendor_used)
-              rewrite_root_copy(files, lambda src, dst, f: is_root_dst(dst), vendor_used)
-              # Safety net for anything the text rewrite could not see
-              patch_core_copy_files()
-
-
-          # -------------------------------------------------------------------- APKs --
-
-          APK_TOKEN = re.compile(r"(\S+\.apk):(\S+\.apk)")
-
-
-          def strip_apk_entries(roots):
-              """Remove src.apk:dst.apk pairs from .mk files. Returns [(file, src, dst)]."""
-              found = []
-              for f in mk_files(*roots):
-                  text = read(f)
-                  if ".apk" not in text:
-                      continue
-                  out, changed = [], False
-                  for ln in text.split("\n"):
-                      if not is_comment(ln) and APK_TOKEN.search(ln):
-                          found += [(f, m.group(1), m.group(2)) for m in APK_TOKEN.finditer(ln)]
-                          out.append(clean_line(ln, APK_TOKEN.sub("", ln)))
-                          changed = True
-                      else:
-                          out.append(ln)
-                  if changed:
-                      write(f, "\n".join(out))
-                      log(f"Removed APK entries from PRODUCT_COPY_FILES in {f}")
-              return found
-
-
-          def add_prebuilt_modules(found):
-              seen, blocks, per_mk = set(), [], {}
-              for f, src, dst in found:
-                  name = pathlib.Path(dst).stem
-                  if name in seen:
-                      continue
-                  seen.add(name)
-
-                  path = src.replace("$(LOCAL_PATH)", str(f.parent))
-                  if not pathlib.Path(path).exists():
-                      log(f"::warning::APK file not found: {path}")
-                  rel = os.path.relpath(path, str(VENDOR_DIR))
-
-                  lines = [
-                      "include $(CLEAR_VARS)",
-                      f"LOCAL_PATH := {VENDOR_DIR}",
-                      f"LOCAL_MODULE := {name}",
-                      "LOCAL_MODULE_TAGS := optional",
-                      "LOCAL_MODULE_CLASS := APPS",
-                      "LOCAL_MODULE_SUFFIX := .apk",
-                      f"LOCAL_SRC_FILES := {rel}",
-                      "LOCAL_CERTIFICATE := PRESIGNED",
-                      "LOCAL_DEX_PREOPT := false",
-                  ]
-                  if "TARGET_COPY_OUT_VENDOR" in dst or dst.startswith("vendor/"):
-                      lines.append("LOCAL_VENDOR_MODULE := true")
-                  elif "TARGET_COPY_OUT_PRODUCT" in dst or dst.startswith("product/"):
-                      lines.append("LOCAL_PRODUCT_MODULE := true")
-                  if "priv-app" in dst:
-                      lines.append("LOCAL_PRIVILEGED_MODULE := true")
-                  lines.append("include $(BUILD_PREBUILT)")
-                  blocks.append("\n".join(lines))
-                  per_mk.setdefault(f, []).append(name)
-
-              android_mk = VENDOR_DIR / "Android.mk"
-              old = read(android_mk) if android_mk.exists() else "LOCAL_PATH := $(call my-dir)\n"
-              write(android_mk, old.rstrip("\n")
-                    + "\n\n# --- prebuilt APKs (auto-generated) ---\n"
-                    + "\n\n".join(blocks) + "\n")
-              log(f"Added {len(blocks)} BUILD_PREBUILT module(s) to {android_mk}")
-
-              for f, names in per_mk.items():
-                  with open(f, "a", encoding="utf-8", errors="surrogateescape") as fh:
-                      fh.write("\n\nPRODUCT_PACKAGES += " + " ".join(names) + "\n")
-                  log(f"Added {len(names)} module(s) to PRODUCT_PACKAGES in {f}")
-
-
-          def cmd_apk():
-              log(f"Mode: {APK_MODE}")
-              found = strip_apk_entries((VENDOR_DIR, DEVICE_DIR))
-              log(f"APK entries removed from PRODUCT_COPY_FILES: {len(found)}")
-              for _, src, dst in found:
-                  log("  -", src, "->", dst)
-              if APK_MODE == "prebuilt" and found:
-                  add_prebuilt_modules(found)
-
-
-          # --------------------------------------------------------------- preflight --
-
-          ENVSETUP = (
-              "export LC_ALL=C ALLOW_MISSING_DEPENDENCIES=true; "
-              "source build/envsetup.sh >/dev/null 2>&1; "
-              f"lunch lineage_{DEV}-{BTYPE} >/dev/null 2>&1 || {{ echo LUNCH_FAILED; exit 7; }}; "
-          )
-          PAIR = re.compile(r"^[\w./+@~-]+:[\w./+@~-]+(?::[\w.-]+)?$")
-
-
-          def copy_pairs():
-              _, out = sh(ENVSETUP + "get_build_var PRODUCT_COPY_FILES")
-              pairs = [tuple(t.split(":")[:2]) for t in out.split() if PAIR.match(t)]
-              log(f"PRODUCT_COPY_FILES pairs: {len(pairs)}")
-              return pairs
-
-
-          _root_copy_attempts = 0
-
-
-          def preflight_fix_root_copy():
-              """Text rewrite first; the build-system override when that cannot help."""
-              global _root_copy_attempts
-              _root_copy_attempts += 1
-
-              pairs = copy_pairs()
-              interesting = [(s, d) for s, d in pairs
-                             if d.endswith("ueventd.rc") or d.endswith("/init.rc") or d == "init.rc"]
-              log("Current ueventd.rc / init.rc pairs:")
-              for s, d in interesting:
-                  log(f"   {s} -> {d}")
-
-              # The text rewrite already ran once and the error is still here: it cannot
-              # see the offending definition, so go straight to the override.
-              if _root_copy_attempts > 1:
-                  log("Text rewrite did not resolve the conflict; applying the build-system override")
-                  return patch_core_copy_files()
-
-              offenders = [(s, d) for s, d in interesting if d in ("root/ueventd.rc", "root/init.rc")]
-              if not offenders:
-                  log("No parsed copy pair targets root/ueventd.rc or root/init.rc "
-                      "(the pair may be built indirectly); applying the build-system override")
-                  return patch_core_copy_files()
-
-              off_srcs = {s for s, _ in offenders}
-              vendor_used = any(d in ("vendor/ueventd.rc", "odm/ueventd.rc") for _, d in pairs)
-
-              def src_matches(src_tok, f):
-                  expanded = src_tok.replace("$(LOCAL_PATH)", str(f.parent))
-                  if expanded in off_srcs:
-                      return True
-                  if "$(" in src_tok:
-                      suffix = src_tok.rsplit(")", 1)[-1]
-                      return bool(suffix) and any(s.endswith(suffix) for s in off_srcs)
-                  return src_tok in off_srcs
-
-              files = mk_files(pathlib.Path("device"), pathlib.Path("vendor"), pathlib.Path("hardware"))
-              changed = rewrite_root_copy(
-                  files,
-                  lambda src, dst, f: not is_foreign_dst(dst) and src_matches(src, f),
-                  vendor_used,
-              )
-              log(f"Files modified: {changed}")
-              if changed == 0:
-                  log("No .mk line matched the conflicting pairs. Likely locations (grep):")
-                  _, out = sh("grep -rn 'ueventd.rc' device vendor hardware "
-                              "--include='*.mk' --include='*.bp' 2>/dev/null | head -40")
-                  log(out)
-                  log("Applying the build-system override instead")
-                  return patch_core_copy_files()
-              return True
-
-
-          def preflight_fix_apks():
-              if APK_MODE == "prebuilt":
-                  log("apk_mode=prebuilt: handled by the APK step, nothing to do here")
-                  return False
-              return bool(strip_apk_entries((VENDOR_DIR, DEVICE_DIR)))
-
-
-          def cmd_preflight():
-              global _log_file
-              result_dir = WS / "result"
-              result_dir.mkdir(parents=True, exist_ok=True)
-              _log_file = result_dir / "preflight.log"
-
-              log("=== Preflight: makefile stage check with automatic fixes ===")
-              log(f"fix_init_rc={os.environ.get('FIX_INIT_RC')} "
-                  f"fix_root_copy={os.environ.get('FIX_ROOT_COPY')} apk_mode={APK_MODE}")
-
-              ok = False
-              for i in range(1, 7):
-                  log(f"--- Attempt {i}: running m nothing ---")
-                  rc, out = sh(ENVSETUP + "m nothing 2>&1")
-                  (result_dir / f"preflight-run{i}.log").write_text(
-                      "\n".join(out.splitlines()[-200:]), encoding="utf-8")
-
-                  if "LUNCH_FAILED" in out:
-                      log("lunch failed; see preflight-run*.log")
-                      break
-                  if rc == 0:
-                      log("Makefile stage passed with no errors")
-                      ok = True
-                      break
-
-                  for line in [l for l in out.splitlines() if "error:" in l or "Error:" in l][:6]:
-                      log("error:", line)
-
-                  fixed = False
-                  if re.search(r"overriding commands for target .*/root/(ueventd|init)\.rc", out):
-                      fixed = preflight_fix_root_copy()
-                  elif "Prebuilt apk found in PRODUCT_COPY_FILES" in out:
-                      fixed = preflight_fix_apks()
-                  else:
-                      log("No automatic fix for this error. Last lines of output:")
-                      log("\n".join(out.splitlines()[-25:]))
-
-                  if not fixed:
-                      log("No change was applied; stopping here")
-                      break
-
-              log("Preflight result:", "passed" if ok else "did not fully pass")
-
-
-          COMMANDS = {
-              "init-rc": cmd_init_rc,
-              "root-copy": cmd_root_copy,
-              "apk": cmd_apk,
-              "preflight": cmd_preflight,
-          }
-
-          if __name__ == "__main__":
-              if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
-                  sys.exit("usage: tree_fixes.py <" + "|".join(COMMANDS) + ">")
-              COMMANDS[sys.argv[1]]()
-          PYEOF
-          python3 -m py_compile "$FIXES"
-
       - name: Patch BoardConfig for dynamic partitions
         working-directory: ${{ github.workspace }}/lineage
         run: |
@@ -719,48 +218,16 @@ jobs:
           done
           grep -rn "BOARD_BUILD_SYSTEM_ROOT_IMAGE" "device/oppo/${DEVICE}" || echo "(none)"
 
-      - name: Fix init.rc conflict
-        if: ${{ inputs.fix_init_rc }}
-        working-directory: ${{ github.workspace }}/lineage
-        run: |
-          D="device/oppo/${DEVICE}"
-          echo "--- init.rc references before ---"
-          grep -rn "init\.rc" "$D" --include='*.mk' --include='*.bp' || echo "(none)"
-          echo "--- rootdir contents ---"
-          ls -la "$D/rootdir" 2>/dev/null || echo "(no rootdir)"
-          ls -la "$D/rootdir/etc" 2>/dev/null || true
-          python3 "$FIXES" init-rc
-          echo "--- after ---"
-          grep -rn "init\.rc" "$D" --include='*.mk' --include='*.bp' || echo "(none)"
-
-      - name: Fix root copy conflicts (ueventd.rc / init.rc)
-        if: ${{ inputs.fix_root_copy }}
-        working-directory: ${{ github.workspace }}/lineage
-        run: |
-          echo "--- ueventd.rc / init.rc references before ---"
-          grep -rnE "(ueventd|init)\.rc" "vendor/oppo/${DEVICE}" "device/oppo/${DEVICE}" --include='*.mk' || echo "(none)"
-          python3 "$FIXES" root-copy
-          echo "--- after ---"
-          grep -rnE "(ueventd|init)\.rc" "vendor/oppo/${DEVICE}" "device/oppo/${DEVICE}" --include='*.mk' || echo "(none)"
-          echo "--- build-system override ---"
-          grep -n "CI fix v2" build/make/core/Makefile || echo "(not applied)"
-
-      - name: Fix prebuilt APKs in PRODUCT_COPY_FILES
-        if: ${{ inputs.apk_mode != 'none' }}
-        working-directory: ${{ github.workspace }}/lineage
-        run: |
-          echo "--- .apk lines before ---"
-          grep -rn "\.apk" "vendor/oppo/${DEVICE}" "device/oppo/${DEVICE}" --include='*.mk' | head -60 || true
-          python3 "$FIXES" apk
-          echo "--- .apk lines after ---"
-          grep -rn "\.apk" "vendor/oppo/${DEVICE}" "device/oppo/${DEVICE}" --include='*.mk' | head -40 || echo "(none)"
-
-      - name: Preflight (self-healing makefile check)
+      - name: Preflight (makefile check)
         if: ${{ inputs.preflight }}
         working-directory: ${{ github.workspace }}/lineage
         run: |
+          set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/result"
-          python3 "$FIXES" preflight || true
+          export LC_ALL=C ALLOW_MISSING_DEPENDENCIES=true
+          source build/envsetup.sh >/dev/null 2>&1
+          lunch "lineage_${DEVICE}-${BTYPE}"
+          m nothing 2>&1 | tee "$GITHUB_WORKSPACE/result/preflight.log" || true
 
       # ------------------------------------------------------------- build --
       - name: Build
@@ -846,7 +313,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lineage-17.1-${{ inputs.device_name }}-${{ inputs.target }}
+          name: lineage-23.2-${{ inputs.device_name }}-${{ inputs.target }}
           path: ${{ github.workspace }}/result
           if-no-files-found: warn
           retention-days: 7
