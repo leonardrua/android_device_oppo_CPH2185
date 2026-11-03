@@ -350,7 +350,7 @@ jobs:
 
           # -------------------------------------------------- ueventd.rc / init.rc ----
 
-          ROOT_RC = re.compile(r"(\S+?):((?:\S*/)?(?:ueventd|init)\.rc)(?=[\s\\]|$)")
+          ROOT_RC = re.compile(r"(\S+?):((?:\S*/)?(?:ueventd|init)\.rc)(?::[\w.-]+)?(?=[\s\\]|$)")
 
 
           def is_root_dst(dst):
@@ -413,6 +413,53 @@ jobs:
               return state["files"]
 
 
+          # Fallback that does not depend on finding the offending line in any .mk file
+          # (pairs built with $(foreach)/$(wildcard)/find-copy-subdir-files, three-part
+          # src:dst:owner entries, product makefiles outside device/vendor/hardware...).
+          # It filters the *final* PRODUCT_COPY_FILES list right before the core Makefile
+          # turns it into copy rules: root/init.rc is dropped, and root/ueventd.rc is
+          # moved to vendor/ueventd.rc (or dropped if a vendor one already exists).
+          CORE_MAKEFILE = pathlib.Path("build/make/core/Makefile")
+          CORE_ANCHOR = "# filter out the duplicate <source file>:<dest file> pairs.\n"
+          CORE_MARKER = "# --- CI fix (auto-generated): root copy conflicts ---"
+          CORE_SNIPPET = """\
+          # --- CI fix (auto-generated): root copy conflicts ---
+          _ci_pcf_dest = $(word 2,$(subst :, ,$(1)))
+          _ci_pcf_src = $(word 1,$(subst :, ,$(1)))
+          _ci_vendor_ue := $(filter vendor/ueventd.rc odm/ueventd.rc,$(foreach p,$(PRODUCT_COPY_FILES),$(call _ci_pcf_dest,$(p))))
+          _ci_root_ue := $(strip $(foreach p,$(PRODUCT_COPY_FILES),$(if $(filter root/ueventd.rc,$(call _ci_pcf_dest,$(p))),$(p))))
+          PRODUCT_COPY_FILES := $(foreach p,$(PRODUCT_COPY_FILES),$(if $(filter root/ueventd.rc root/init.rc,$(call _ci_pcf_dest,$(p))),,$(p)))
+          ifeq ($(strip $(_ci_vendor_ue)),)
+          ifneq ($(_ci_root_ue),)
+          PRODUCT_COPY_FILES += $(call _ci_pcf_src,$(firstword $(_ci_root_ue))):vendor/ueventd.rc
+          endif
+          endif
+          _ci_pcf_dest :=
+          _ci_pcf_src :=
+          _ci_vendor_ue :=
+          _ci_root_ue :=
+          # --- end CI fix ---
+
+          """
+
+
+          def patch_core_copy_files():
+              """Install the PRODUCT_COPY_FILES override. Returns True if newly applied."""
+              if not CORE_MAKEFILE.exists():
+                  log(f"::warning::{CORE_MAKEFILE} not found; cannot apply the build-system override")
+                  return False
+              text = read(CORE_MAKEFILE)
+              if CORE_MARKER in text:
+                  log("Build-system override is already in place")
+                  return False
+              if CORE_ANCHOR not in text:
+                  log(f"::warning::Anchor line not found in {CORE_MAKEFILE}; cannot apply the override")
+                  return False
+              write(CORE_MAKEFILE, text.replace(CORE_ANCHOR, CORE_SNIPPET + CORE_ANCHOR, 1))
+              log(f"Applied the PRODUCT_COPY_FILES override to {CORE_MAKEFILE}")
+              return True
+
+
           def cmd_root_copy():
               files = mk_files(VENDOR_DIR, DEVICE_DIR)
               vendor_used = any(
@@ -422,6 +469,8 @@ jobs:
               )
               log("ueventd.rc already installed to vendor:", vendor_used)
               rewrite_root_copy(files, lambda src, dst, f: is_root_dst(dst), vendor_used)
+              # Safety net for anything the text rewrite could not see
+              patch_core_copy_files()
 
 
           # -------------------------------------------------------------------- APKs --
@@ -514,17 +563,24 @@ jobs:
               "source build/envsetup.sh >/dev/null 2>&1; "
               f"lunch lineage_{DEV}-{BTYPE} >/dev/null 2>&1 || {{ echo LUNCH_FAILED; exit 7; }}; "
           )
-          PAIR = re.compile(r"^[\w./+@~-]+:[\w./+@~-]+$")
+          PAIR = re.compile(r"^[\w./+@~-]+:[\w./+@~-]+(?::[\w.-]+)?$")
 
 
           def copy_pairs():
               _, out = sh(ENVSETUP + "get_build_var PRODUCT_COPY_FILES")
-              pairs = [t.split(":", 1) for t in out.split() if PAIR.match(t)]
+              pairs = [tuple(t.split(":")[:2]) for t in out.split() if PAIR.match(t)]
               log(f"PRODUCT_COPY_FILES pairs: {len(pairs)}")
               return pairs
 
 
+          _root_copy_attempts = 0
+
+
           def preflight_fix_root_copy():
+              """Text rewrite first; the build-system override when that cannot help."""
+              global _root_copy_attempts
+              _root_copy_attempts += 1
+
               pairs = copy_pairs()
               interesting = [(s, d) for s, d in pairs
                              if d.endswith("ueventd.rc") or d.endswith("/init.rc") or d == "init.rc"]
@@ -532,11 +588,17 @@ jobs:
               for s, d in interesting:
                   log(f"   {s} -> {d}")
 
+              # The text rewrite already ran once and the error is still here: it cannot
+              # see the offending definition, so go straight to the override.
+              if _root_copy_attempts > 1:
+                  log("Text rewrite did not resolve the conflict; applying the build-system override")
+                  return patch_core_copy_files()
+
               offenders = [(s, d) for s, d in interesting if d in ("root/ueventd.rc", "root/init.rc")]
               if not offenders:
-                  log("No copy pairs target root/ueventd.rc or root/init.rc; "
-                      "the conflict does not come from PRODUCT_COPY_FILES")
-                  return False
+                  log("No parsed copy pair targets root/ueventd.rc or root/init.rc "
+                      "(the pair may be built indirectly); applying the build-system override")
+                  return patch_core_copy_files()
 
               off_srcs = {s for s, _ in offenders}
               vendor_used = any(d in ("vendor/ueventd.rc", "odm/ueventd.rc") for _, d in pairs)
@@ -562,7 +624,9 @@ jobs:
                   _, out = sh("grep -rn 'ueventd.rc' device vendor hardware "
                               "--include='*.mk' --include='*.bp' 2>/dev/null | head -40")
                   log(out)
-              return changed > 0
+                  log("Applying the build-system override instead")
+                  return patch_core_copy_files()
+              return True
 
 
           def preflight_fix_apks():
@@ -661,6 +725,8 @@ jobs:
           python3 "$FIXES" root-copy
           echo "--- after ---"
           grep -rnE "(ueventd|init)\.rc" "vendor/oppo/${DEVICE}" "device/oppo/${DEVICE}" --include='*.mk' || echo "(none)"
+          echo "--- build-system override ---"
+          grep -n "CI fix (auto-generated)" build/make/core/Makefile || echo "(not applied)"
 
       - name: Fix prebuilt APKs in PRODUCT_COPY_FILES
         if: ${{ inputs.apk_mode != 'none' }}
