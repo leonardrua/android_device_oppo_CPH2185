@@ -51,7 +51,7 @@ on post-fs-data
    mkdir /data/vendor/euclid/engineering 0771 system system
    mkdir /data/vendor/euclid/version 0771 system system
    mount ext4 loop@/vendor/euclid/product.img  /data/vendor/euclid/product ro
-   mount ext4 /dev/block/mapper/oppo_product  /data/vendor/euclid/product ro
+   mount ext4 /dev/block/mapper/product  /data/vendor/euclid/product ro
    start overlay_mount_euclid
    start mount_euclid
 
@@ -105,9 +105,9 @@ on property:ro.vendor.version_variant=*
 #Haiping.Zhong@AD.CTS.0, 2019/11/30, Add for Android Q VTS fingerprint
 on property:ro.vendor.gsi.version_variant=*
     setprop ro.vendor.gsi.build.flavor aosp_arm64-user
-    mount ext4 /dev/block/mapper/oppo_product  /mnt/vendor/oppo_product ro
+    mount ext4 /dev/block/mapper/product  /mnt/vendor/oppo_product ro
     mount ext4 /dev/block/mapper/version.${ro.vendor.gsi.version_variant}  /mnt/vendor/oppo_version ro
-    mount ext4 /dev/block/mapper/oppo_product  /data/vendor/euclid/product ro
+    mount ext4 /dev/block/mapper/product  /data/vendor/euclid/product ro
     mount ext4 /dev/block/mapper/version.${ro.vendor.gsi.version_variant}  /data/vendor/euclid/version ro
 #endif
 
