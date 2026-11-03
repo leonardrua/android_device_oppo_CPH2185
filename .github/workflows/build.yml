@@ -86,7 +86,6 @@ permissions:
 jobs:
   build:
     runs-on: namespace-profile-leonard
-    timeout-minutes: 720
     env:
       TOKEN: ${{ secrets.GH_PAT || github.token }}
       IN_DEVICE_REPO: ${{ inputs.device_repo }}
@@ -416,35 +415,40 @@ jobs:
           # Fallback that does not depend on finding the offending line in any .mk file
           # (pairs built with $(foreach)/$(wildcard)/find-copy-subdir-files, three-part
           # src:dst:owner entries, product makefiles outside device/vendor/hardware...).
-          # It filters the *final* PRODUCT_COPY_FILES list right before the core Makefile
-          # turns it into copy rules: root/init.rc is dropped, and root/ueventd.rc is
-          # moved to vendor/ueventd.rc (or dropped if a vendor one already exists).
+          #
+          # PRODUCT_COPY_FILES is read-only (kati) by the time the core Makefile runs, so
+          # it cannot be reassigned. Instead the patch computes a filtered copy of the
+          # list in a private variable and points the core copy loop at it:
+          #   - root/init.rc copies are dropped
+          #   - root/ueventd.rc is moved to vendor/ueventd.rc (or dropped if a vendor
+          #     copy already exists)
           CORE_MAKEFILE = pathlib.Path("build/make/core/Makefile")
           CORE_ANCHOR = "# filter out the duplicate <source file>:<dest file> pairs.\n"
-          CORE_MARKER = "# --- CI fix (auto-generated): root copy conflicts ---"
+          CORE_LOOP_OLD = "$(foreach cf,$(PRODUCT_COPY_FILES), \\\n"
+          CORE_LOOP_NEW = "$(foreach cf,$(_ci_pcf_final), \\\n"
+          CORE_MARKER = "# --- CI fix v2 (auto-generated): root copy conflicts ---"
+          CORE_END = "# --- end CI fix ---\n"
+          # First-generation patch assigned to PRODUCT_COPY_FILES and breaks kati; strip it if found.
+          LEGACY_MARKER = "# --- CI fix (auto-generated): root copy conflicts ---"
           CORE_SNIPPET = """\
-          # --- CI fix (auto-generated): root copy conflicts ---
+          # --- CI fix v2 (auto-generated): root copy conflicts ---
           _ci_pcf_dest = $(word 2,$(subst :, ,$(1)))
           _ci_pcf_src = $(word 1,$(subst :, ,$(1)))
           _ci_vendor_ue := $(filter vendor/ueventd.rc odm/ueventd.rc,$(foreach p,$(PRODUCT_COPY_FILES),$(call _ci_pcf_dest,$(p))))
           _ci_root_ue := $(strip $(foreach p,$(PRODUCT_COPY_FILES),$(if $(filter root/ueventd.rc,$(call _ci_pcf_dest,$(p))),$(p))))
-          PRODUCT_COPY_FILES := $(foreach p,$(PRODUCT_COPY_FILES),$(if $(filter root/ueventd.rc root/init.rc,$(call _ci_pcf_dest,$(p))),,$(p)))
+          _ci_pcf_final := $(foreach p,$(PRODUCT_COPY_FILES),$(if $(filter root/ueventd.rc root/init.rc,$(call _ci_pcf_dest,$(p))),,$(p)))
           ifeq ($(strip $(_ci_vendor_ue)),)
           ifneq ($(_ci_root_ue),)
-          PRODUCT_COPY_FILES += $(call _ci_pcf_src,$(firstword $(_ci_root_ue))):vendor/ueventd.rc
+          _ci_pcf_final += $(call _ci_pcf_src,$(firstword $(_ci_root_ue))):vendor/ueventd.rc
           endif
           endif
-          _ci_pcf_dest :=
-          _ci_pcf_src :=
-          _ci_vendor_ue :=
-          _ci_root_ue :=
           # --- end CI fix ---
 
           """
 
 
           def patch_core_copy_files():
-              """Install the PRODUCT_COPY_FILES override. Returns True if newly applied."""
+              """Install the PRODUCT_COPY_FILES filter. Returns True if newly applied."""
               if not CORE_MAKEFILE.exists():
                   log(f"::warning::{CORE_MAKEFILE} not found; cannot apply the build-system override")
                   return False
@@ -452,11 +456,23 @@ jobs:
               if CORE_MARKER in text:
                   log("Build-system override is already in place")
                   return False
+
+              if LEGACY_MARKER in text:
+                  a = text.index(LEGACY_MARKER)
+                  b = text.index(CORE_END, a) + len(CORE_END)
+                  text = text[:a] + text[b:].lstrip("\n")
+                  log("Removed an earlier, incompatible override from the core Makefile")
+
               if CORE_ANCHOR not in text:
                   log(f"::warning::Anchor line not found in {CORE_MAKEFILE}; cannot apply the override")
                   return False
-              write(CORE_MAKEFILE, text.replace(CORE_ANCHOR, CORE_SNIPPET + CORE_ANCHOR, 1))
-              log(f"Applied the PRODUCT_COPY_FILES override to {CORE_MAKEFILE}")
+              head, tail = text.split(CORE_ANCHOR, 1)
+              if CORE_LOOP_OLD not in tail:
+                  log(f"::warning::Copy loop not found in {CORE_MAKEFILE}; cannot apply the override")
+                  return False
+              tail = tail.replace(CORE_LOOP_OLD, CORE_LOOP_NEW, 1)
+              write(CORE_MAKEFILE, head + CORE_SNIPPET + CORE_ANCHOR + tail)
+              log(f"Applied the PRODUCT_COPY_FILES filter to {CORE_MAKEFILE}")
               return True
 
 
@@ -726,7 +742,7 @@ jobs:
           echo "--- after ---"
           grep -rnE "(ueventd|init)\.rc" "vendor/oppo/${DEVICE}" "device/oppo/${DEVICE}" --include='*.mk' || echo "(none)"
           echo "--- build-system override ---"
-          grep -n "CI fix (auto-generated)" build/make/core/Makefile || echo "(not applied)"
+          grep -n "CI fix v2" build/make/core/Makefile || echo "(not applied)"
 
       - name: Fix prebuilt APKs in PRODUCT_COPY_FILES
         if: ${{ inputs.apk_mode != 'none' }}
