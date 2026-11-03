@@ -1,2 +1,21 @@
 soong_namespace {
 }
+
+android_app_import {
+    name: "SoterService",
+    apk: "proprietary/system/app/SoterService/SoterService.apk",
+    presigned: true,
+    dex_preopt: {
+        enabled: false,
+    },
+}
+
+android_app_import {
+    name: "EmCamera",
+    apk: "proprietary/vendor/app/EmCamera/EmCamera.apk",
+    presigned: true,
+    dex_preopt: {
+        enabled: false,
+    },
+    vendor: true,
+}

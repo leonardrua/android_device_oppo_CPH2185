@@ -2,10 +2,13 @@
 
 PRODUCT_SOONG_NAMESPACES += vendor/oppo/CPH2185
 
+PRODUCT_PACKAGES += \
+    SoterService \
+    EmCamera
+
 PRODUCT_COPY_FILES += \
     vendor/oppo/CPH2185/proprietary/odm/etc/vintf/manifest_dsds.xml:$(TARGET_COPY_OUT_ODM)/etc/vintf/manifest_dsds.xml \
     vendor/oppo/CPH2185/proprietary/odm/etc/vintf/manifest_ss.xml:$(TARGET_COPY_OUT_ODM)/etc/vintf/manifest_ss.xml \
-    vendor/oppo/CPH2185/proprietary/system/app/SoterService/SoterService.apk:$(TARGET_COPY_OUT_SYSTEM)/app/SoterService/SoterService.apk \
     vendor/oppo/CPH2185/proprietary/system/etc/a2dp_audio_policy_configuration.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/a2dp_audio_policy_configuration.xml \
     vendor/oppo/CPH2185/proprietary/system/etc/audio_effects.conf:$(TARGET_COPY_OUT_SYSTEM)/etc/audio_effects.conf \
     vendor/oppo/CPH2185/proprietary/system/etc/audio_policy_configuration.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/audio_policy_configuration.xml \
@@ -16,7 +19,6 @@ PRODUCT_COPY_FILES += \
     vendor/oppo/CPH2185/proprietary/system/etc/default_volume_tables.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/default_volume_tables.xml \
     vendor/oppo/CPH2185/proprietary/system/etc/hearing_aid_audio_policy_configuration.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/hearing_aid_audio_policy_configuration.xml \
     vendor/oppo/CPH2185/proprietary/system/etc/r_submix_audio_policy_configuration.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/r_submix_audio_policy_configuration.xml \
-    vendor/oppo/CPH2185/proprietary/system/etc/seccomp_policy/mediacodec.policy:$(TARGET_COPY_OUT_SYSTEM)/etc/seccomp_policy/mediacodec.policy \
     vendor/oppo/CPH2185/proprietary/system/etc/usb_audio_policy_configuration.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/usb_audio_policy_configuration.xml \
     vendor/oppo/CPH2185/proprietary/system/lib/egl/libGLES_android.so:$(TARGET_COPY_OUT_SYSTEM)/lib/egl/libGLES_android.so \
     vendor/oppo/CPH2185/proprietary/system/lib/libarcsoft_dualcam_wt_calibration.so:$(TARGET_COPY_OUT_SYSTEM)/lib/libarcsoft_dualcam_wt_calibration.so \
@@ -62,7 +64,6 @@ PRODUCT_COPY_FILES += \
     vendor/oppo/CPH2185/proprietary/system/lib64/vendor.mediatek.hardware.pq@2.3.so:$(TARGET_COPY_OUT_SYSTEM)/lib64/vendor.mediatek.hardware.pq@2.3.so \
     vendor/oppo/CPH2185/proprietary/system/lib64/vendor.mediatek.hardware.videotelephony@1.0.so:$(TARGET_COPY_OUT_SYSTEM)/lib64/vendor.mediatek.hardware.videotelephony@1.0.so \
     vendor/oppo/CPH2185/proprietary/system/lib64/vendor.trustonic.tee@1.0.so:$(TARGET_COPY_OUT_SYSTEM)/lib64/vendor.trustonic.tee@1.0.so \
-    vendor/oppo/CPH2185/proprietary/vendor/app/EmCamera/EmCamera.apk:$(TARGET_COPY_OUT_VENDOR)/app/EmCamera/EmCamera.apk \
     vendor/oppo/CPH2185/proprietary/vendor/app/mcRegistry/020f0000000000000000000000000000.drbin:$(TARGET_COPY_OUT_VENDOR)/app/mcRegistry/020f0000000000000000000000000000.drbin \
     vendor/oppo/CPH2185/proprietary/vendor/app/mcRegistry/020f0000000000000000000000000000.tlbin:$(TARGET_COPY_OUT_VENDOR)/app/mcRegistry/020f0000000000000000000000000000.tlbin \
     vendor/oppo/CPH2185/proprietary/vendor/app/mcRegistry/030b0000000000000000000000000000.drbin:$(TARGET_COPY_OUT_VENDOR)/app/mcRegistry/030b0000000000000000000000000000.drbin \
