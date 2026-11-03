@@ -1,0 +1,14 @@
+# Derived from the stock CPH2185 recovery fstab for the Lineage partition layout.
+system /system ext4 ro wait,avb=vbmeta,logical,first_stage_mount,async_discard
+vendor /vendor ext4 ro wait,avb,logical,first_stage_mount,async_discard
+product /product ext4 ro wait,logical,first_stage_mount,async_discard
+
+/dev/block/by-name/cache /cache ext4 noatime,nosuid,nodev,noauto_da_alloc,discard wait,check,formattable,first_stage_mount
+/dev/block/platform/bootdevice/by-name/userdata /data ext4 noatime,nosuid,nodev,noauto_da_alloc,errors=panic wait,check,quota,reservedsize=128M,formattable,resize,checkpoint=block,fileencryption=aes-256-xts
+
+/dev/block/by-name/para /misc emmc defaults defaults
+/dev/block/by-name/boot /boot emmc defaults defaults
+/dev/block/by-name/recovery /recovery emmc defaults defaults
+
+/dev/block/mmcblk1p1 /external_sd vfat nosuid,nodev defaults
+/dev/block/sda1 /usb_otg vfat nosuid,nodev defaults
